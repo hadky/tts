@@ -2827,7 +2827,7 @@ async function handleAudioTranscription(request) {
         }
 
         // 使用默认token或用户提供的token
-        const token = customToken || 'sk-wtldsvuprmwltxpbspbmawtolbacghzawnjhtlzlnujjkfhh';
+        const token = customToken || 'r3f4xEhacP-98JzXjcKENsETu5AlzHN9YwsyDPZqnSk';
 
         // 构建发送到硅基流动API的FormData
         const apiFormData = new FormData();
