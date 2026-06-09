@@ -940,7 +940,28 @@ const HTML_PAGE = `
     </div>
 
     <div class="container">
-        
+        <div class="header">
+            <h1 data-i18n="header.title">VoiceCraft</h1>
+            <p class="subtitle" data-i18n="header.subtitle">AI-Powered Voice Processing Platform</p>
+            <div class="features">
+                <div class="feature-item">
+                    <span class="feature-icon">✨</span>
+                    <span data-i18n="header.feature1">20+ Voice Options</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">⚡</span>
+                    <span data-i18n="header.feature2">Lightning Fast</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🆓</span>
+                    <span data-i18n="header.feature3">Completely Free</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📱</span>
+                    <span data-i18n="header.feature4">Download Support</span>
+                </div>
+            </div>
+        </div>
         
         <!-- 主功能切换器 -->
         <div class="mode-switcher">
@@ -2082,11 +2103,11 @@ const HTML_PAGE = `
 
 export default {
     async fetch(request, env, ctx) {
-        return handleRequest(request);
+        return handleRequest(request, ctx);
     }
 };
 
-async function handleRequest(request) {
+async function handleRequest(request, ctx) {
     if (request.method === "OPTIONS") {
         return handleOptions(request);
     }
@@ -2164,6 +2185,26 @@ async function handleRequest(request) {
             } = requestBody;
 
             // —— pcm/wav → 微软原生 riff PCM (ESP32 可直接喂 I2S); 否则 mp3 (浏览器播放) ——
+            const cacheKey = await makeTtsCacheKey({
+                input,
+                voice,
+                speed,
+                volume,
+                pitch,
+                style,
+                response_format,
+                sample_rate
+            });
+            const cached = await caches.default.match(cacheKey);
+            if (cached) {
+                const headers = new Headers(cached.headers);
+                headers.set("X-TTS-Cache", "HIT");
+                return new Response(cached.body, {
+                    status: cached.status,
+                    headers
+                });
+            }
+
             let outputFormat = "audio-24khz-48kbitrate-mono-mp3";
             const rf = String(response_format).toLowerCase();
             const wantAdpcm = (rf === "adpcm");
@@ -2185,18 +2226,32 @@ async function handleRequest(request) {
                 outputFormat
             );
 
-            if (!wantAdpcm) return response;
             if (!response.ok) return response;
 
-            const wavBytes = new Uint8Array(await response.arrayBuffer());
-            const adpcmBytes = wavToImaAdpcmWadp(wavBytes);
-            return new Response(adpcmBytes, {
-                headers: {
-                    "Content-Type": "application/octet-stream",
-                    "Content-Length": String(adpcmBytes.length),
-                    ...makeCORSHeaders()
-                }
+            let finalResponse = response;
+            if (wantAdpcm) {
+                const wavBytes = new Uint8Array(await response.arrayBuffer());
+                const adpcmBytes = wavToImaAdpcmWadp(wavBytes);
+                finalResponse = new Response(adpcmBytes, {
+                    headers: {
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": String(adpcmBytes.length),
+                        ...makeCORSHeaders()
+                    }
+                });
+            }
+
+            const finalHeaders = new Headers(finalResponse.headers);
+            finalHeaders.set("Cache-Control", "public, max-age=86400");
+            finalHeaders.set("X-TTS-Cache", "MISS");
+            finalResponse = new Response(finalResponse.body, {
+                status: finalResponse.status,
+                headers: finalHeaders
             });
+            const putPromise = caches.default.put(cacheKey, finalResponse.clone());
+            if (ctx && ctx.waitUntil) ctx.waitUntil(putPromise);
+            else await putPromise;
+            return finalResponse;
 
         } catch (error) {
             console.error("Error:", error);
@@ -2312,6 +2367,29 @@ async function processBatchedAudioChunks(chunks, voiceName, rate, pitch, volume,
     }
     
     return audioChunks;
+}
+
+async function sha256Hex(text) {
+    const bytes = new TextEncoder().encode(text);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+}
+
+async function makeTtsCacheKey(params) {
+    const normalized = {
+        input: String(params.input || "").trim(),
+        voice: String(params.voice || "zh-CN-XiaoxiaoNeural"),
+        speed: String(params.speed ?? "1.0"),
+        volume: String(params.volume ?? "0"),
+        pitch: String(params.pitch ?? "0"),
+        style: String(params.style || "general"),
+        response_format: String(params.response_format || "mp3").toLowerCase(),
+        sample_rate: String(params.sample_rate || 16000)
+    };
+    const hash = await sha256Hex(JSON.stringify(normalized));
+    return new Request(`https://voicecraft-cache.local/tts/${hash}`, { method: "GET" });
 }
 
 function readU16LE(bytes, offset) {
