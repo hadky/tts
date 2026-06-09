@@ -1233,7 +1233,8 @@ const HTML_PAGE = `
             </div>
         </div>
         
-     
+        <!-- 公众号推广组件 -->
+         
     </div>
 
     <script>
@@ -1683,7 +1684,7 @@ const HTML_PAGE = `
                         progressInfo.textContent = '文本长度: ' + textLength + ' 字符';
                     }
                     
-                    response = await fetch('/v1/audio/speech', {
+                    response = await fetch('/v1/audio/speech?token=r3f4xEhacP-98JzXjcKENsETu5AlzHN9YwsyDPZqnSk', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -1708,7 +1709,7 @@ const HTML_PAGE = `
                     formData.append('pitch', pitch);
                     formData.append('style', style);
                     
-                    response = await fetch('/v1/audio/speech', {
+                    response = await fetch('/v1/audio/speech?token=r3f4xEhacP-98JzXjcKENsETu5AlzHN9YwsyDPZqnSk', {
                         method: 'POST',
                         body: formData
                     });
@@ -2131,13 +2132,25 @@ async function handleRequest(request) {
 
     if (path === "/v1/audio/speech") {
         try {
+            // —— token 校验 (ESP32 固件 / 网页 / 外部调用均需带 token; 网页同源 fetch 也带) ——
+            const TTS_API_TOKEN = "r3f4xEhacP-98JzXjcKENsETu5AlzHN9YwsyDPZqnSk";
+            let tok = requestUrl.searchParams.get("token");
+            if (!tok) {
+                const auth = request.headers.get("Authorization") || "";
+                if (auth.startsWith("Bearer ")) tok = auth.slice(7).trim();
+            }
+            if (tok !== TTS_API_TOKEN) {
+                return new Response(JSON.stringify({ error: { message: "invalid token", type: "auth_error", code: "invalid_token" } }),
+                    { status: 401, headers: { "Content-Type": "application/json", ...makeCORSHeaders() } });
+            }
+
             const contentType = request.headers.get("content-type") || "";
-            
+
             // 处理文件上传
             if (contentType.includes("multipart/form-data")) {
                 return await handleFileUpload(request);
             }
-            
+
             // 处理JSON请求（原有功能）
             const requestBody = await request.json();
             const {
@@ -2146,8 +2159,18 @@ async function handleRequest(request) {
                 speed = '1.0',
                 volume = '0',
                 pitch = '0',
-                style = "general"
+                style = "general",
+                response_format = "mp3",
+                sample_rate = 16000
             } = requestBody;
+
+            // —— pcm/wav → 微软原生 riff PCM (ESP32 可直接喂 I2S); 否则 mp3 (浏览器播放) ——
+            let outputFormat = "audio-24khz-48kbitrate-mono-mp3";
+            const rf = String(response_format).toLowerCase();
+            if (rf === "pcm" || rf === "wav") {
+                const sr = [8000, 16000, 24000].includes(parseInt(sample_rate)) ? parseInt(sample_rate) : 16000;
+                outputFormat = `riff-${sr / 1000}khz-16bit-mono-pcm`;
+            }
 
             let rate = parseInt(String((parseFloat(speed) - 1.0) * 100));
             let numVolume = parseInt(String(parseFloat(volume) * 100));
@@ -2159,7 +2182,7 @@ async function handleRequest(request) {
                 numPitch >= 0 ? `+${numPitch}Hz` : `${numPitch}Hz`,
                 numVolume >= 0 ? `+${numVolume}%` : `${numVolume}%`,
                 style,
-                "audio-24khz-48kbitrate-mono-mp3"
+                outputFormat
             );
 
             return response;
@@ -2291,9 +2314,10 @@ async function getVoice(text, voiceName = "zh-CN-XiaoxiaoNeural", rate = '+0%', 
         // 如果文本很短，直接处理
         if (cleanText.length <= 1500) {
             const audioBlob = await getAudioChunk(cleanText, voiceName, rate, pitch, volume, style, outputFormat);
+            const ctOut = (outputFormat.includes("riff") || outputFormat.includes("pcm")) ? "audio/wav" : "audio/mpeg";
             return new Response(audioBlob, {
                 headers: {
-                    "Content-Type": "audio/mpeg",
+                    "Content-Type": ctOut,
                     ...makeCORSHeaders()
                 }
             });
@@ -2322,11 +2346,12 @@ async function getVoice(text, voiceName = "zh-CN-XiaoxiaoNeural", rate = '+0%', 
             800 // 批次间延迟800ms
         );
 
-        // 将音频片段拼接起来
-        const concatenatedAudio = new Blob(audioChunks, { type: 'audio/mpeg' });
+        // 将音频片段拼接起来 (注: PCM 多块裸拼会有多个 WAV 头, 长文本+pcm 不保证; ESP32 播报文本短走单块路径不触发)
+        const isPcmOut = (outputFormat.includes("riff") || outputFormat.includes("pcm"));
+        const concatenatedAudio = new Blob(audioChunks, { type: isPcmOut ? 'audio/wav' : 'audio/mpeg' });
         return new Response(concatenatedAudio, {
             headers: {
-                "Content-Type": "audio/mpeg",
+                "Content-Type": isPcmOut ? "audio/wav" : "audio/mpeg",
                 ...makeCORSHeaders()
             }
         });
