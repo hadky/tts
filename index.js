@@ -2216,6 +2216,7 @@ async function handleRequest(request, ctx) {
             let rate = parseInt(String((parseFloat(speed) - 1.0) * 100));
             let numVolume = parseInt(String(parseFloat(volume) * 100));
             let numPitch = parseInt(pitch);
+            const genStart = Date.now();
             const response = await getVoice(
                 input,
                 voice,
@@ -2225,13 +2226,17 @@ async function handleRequest(request, ctx) {
                 style,
                 outputFormat
             );
+            const genMs = Date.now() - genStart;
 
             if (!response.ok) return response;
 
             let finalResponse = response;
+            let adpcmMs = 0;
             if (wantAdpcm) {
+                const adpcmStart = Date.now();
                 const wavBytes = new Uint8Array(await response.arrayBuffer());
                 const adpcmBytes = wavToImaAdpcmWadp(wavBytes);
+                adpcmMs = Date.now() - adpcmStart;
                 finalResponse = new Response(adpcmBytes, {
                     headers: {
                         "Content-Type": "application/octet-stream",
@@ -2244,6 +2249,7 @@ async function handleRequest(request, ctx) {
             const finalHeaders = new Headers(finalResponse.headers);
             finalHeaders.set("Cache-Control", "public, max-age=86400");
             finalHeaders.set("X-TTS-Cache", "MISS");
+            finalHeaders.set("Server-Timing", `edge;dur=${genMs}, adpcm;dur=${adpcmMs}`);
             finalResponse = new Response(finalResponse.body, {
                 status: finalResponse.status,
                 headers: finalHeaders
