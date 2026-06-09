@@ -940,28 +940,7 @@ const HTML_PAGE = `
     </div>
 
     <div class="container">
-        <div class="header">
-            <h1 data-i18n="header.title">VoiceCraft</h1>
-            <p class="subtitle" data-i18n="header.subtitle">AI-Powered Voice Processing Platform</p>
-            <div class="features">
-                <div class="feature-item">
-                    <span class="feature-icon">✨</span>
-                    <span data-i18n="header.feature1">20+ Voice Options</span>
-                </div>
-                <div class="feature-item">
-                    <span class="feature-icon">⚡</span>
-                    <span data-i18n="header.feature2">Lightning Fast</span>
-                </div>
-                <div class="feature-item">
-                    <span class="feature-icon">🆓</span>
-                    <span data-i18n="header.feature3">Completely Free</span>
-                </div>
-                <div class="feature-item">
-                    <span class="feature-icon">📱</span>
-                    <span data-i18n="header.feature4">Download Support</span>
-                </div>
-            </div>
-        </div>
+        
         
         <!-- 主功能切换器 -->
         <div class="mode-switcher">
