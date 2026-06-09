@@ -1234,7 +1234,27 @@ const HTML_PAGE = `
         </div>
         
         <!-- 公众号推广组件 -->
-         
+        <div class="wechat-promotion" id="wechatPromotion" style="display: none;">
+            <div class="promotion-header">
+                <h2 class="promotion-title">🎉 生成成功！喜欢这个工具吗？</h2>
+                <p class="promotion-subtitle">关注我们获取更多AI工具和技术分享</p>
+            </div>
+            <div class="promotion-content">
+                <div class="qr-code">
+                    <img src="https://img.996007.icu/file/img1/a48c4eac2f2a99909da5611c3885726.jpg" alt="微信公众号二维码" />
+                </div>
+                <div class="promotion-info">
+                    <h3>关注「一只会飞的旺旺」公众号</h3>
+                    <p>获取更多实用的AI工具、技术教程和独家资源分享</p>
+                    <ul class="benefits-list">
+                        <li>最新AI工具推荐和使用教程</li>
+                        <li>前沿技术解析和实战案例</li>
+                        <li>独家资源和工具源码分享</li>
+                        <li>技术问题答疑和交流社群</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -2167,7 +2187,8 @@ async function handleRequest(request) {
             // —— pcm/wav → 微软原生 riff PCM (ESP32 可直接喂 I2S); 否则 mp3 (浏览器播放) ——
             let outputFormat = "audio-24khz-48kbitrate-mono-mp3";
             const rf = String(response_format).toLowerCase();
-            if (rf === "pcm" || rf === "wav") {
+            const wantAdpcm = (rf === "adpcm");
+            if (rf === "pcm" || rf === "wav" || wantAdpcm) {
                 const sr = [8000, 16000, 24000].includes(parseInt(sample_rate)) ? parseInt(sample_rate) : 16000;
                 outputFormat = `riff-${sr / 1000}khz-16bit-mono-pcm`;
             }
@@ -2185,7 +2206,18 @@ async function handleRequest(request) {
                 outputFormat
             );
 
-            return response;
+            if (!wantAdpcm) return response;
+            if (!response.ok) return response;
+
+            const wavBytes = new Uint8Array(await response.arrayBuffer());
+            const adpcmBytes = wavToImaAdpcmWadp(wavBytes);
+            return new Response(adpcmBytes, {
+                headers: {
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": String(adpcmBytes.length),
+                    ...makeCORSHeaders()
+                }
+            });
 
         } catch (error) {
             console.error("Error:", error);
@@ -2301,6 +2333,151 @@ async function processBatchedAudioChunks(chunks, voiceName, rate, pitch, volume,
     }
     
     return audioChunks;
+}
+
+function readU16LE(bytes, offset) {
+    return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+function readI16LE(bytes, offset) {
+    const v = readU16LE(bytes, offset);
+    return v & 0x8000 ? v - 0x10000 : v;
+}
+
+function readU32LE(bytes, offset) {
+    return (bytes[offset] | (bytes[offset + 1] << 8) |
+        (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
+}
+
+function writeU32LE(bytes, offset, value) {
+    bytes[offset] = value & 0xFF;
+    bytes[offset + 1] = (value >>> 8) & 0xFF;
+    bytes[offset + 2] = (value >>> 16) & 0xFF;
+    bytes[offset + 3] = (value >>> 24) & 0xFF;
+}
+
+function writeI16LE(bytes, offset, value) {
+    const v = value < 0 ? value + 0x10000 : value;
+    bytes[offset] = v & 0xFF;
+    bytes[offset + 1] = (v >>> 8) & 0xFF;
+}
+
+function fourcc(bytes, offset) {
+    return String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+}
+
+function parsePcm16MonoWav(wavBytes) {
+    if (wavBytes.length < 44 || fourcc(wavBytes, 0) !== "RIFF" || fourcc(wavBytes, 8) !== "WAVE") {
+        throw new Error("invalid wav header");
+    }
+
+    let offset = 12;
+    let sampleRate = 0;
+    let channels = 0;
+    let bitsPerSample = 0;
+    let audioFormat = 0;
+    let dataOffset = -1;
+    let dataSize = 0;
+
+    while (offset + 8 <= wavBytes.length) {
+        const id = fourcc(wavBytes, offset);
+        const size = readU32LE(wavBytes, offset + 4);
+        const body = offset + 8;
+        if (body + size > wavBytes.length) break;
+
+        if (id === "fmt ") {
+            audioFormat = readU16LE(wavBytes, body);
+            channels = readU16LE(wavBytes, body + 2);
+            sampleRate = readU32LE(wavBytes, body + 4);
+            bitsPerSample = readU16LE(wavBytes, body + 14);
+        } else if (id === "data") {
+            dataOffset = body;
+            dataSize = size;
+            break;
+        }
+        offset = body + size + (size & 1);
+    }
+
+    if (audioFormat !== 1 || channels !== 1 || bitsPerSample !== 16 || dataOffset < 0) {
+        throw new Error(`unsupported wav: fmt=${audioFormat} ch=${channels} bits=${bitsPerSample}`);
+    }
+
+    return {
+        sampleRate,
+        pcmOffset: dataOffset,
+        sampleCount: Math.floor(dataSize / 2)
+    };
+}
+
+function wavToImaAdpcmWadp(wavBytes) {
+    const stepTable = [
+        7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31,
+        34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143,
+        157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544,
+        598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707,
+        1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871,
+        5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+        15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+    ];
+    const indexTable = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+    const wav = parsePcm16MonoWav(wavBytes);
+    const outLen = 16 + Math.ceil(Math.max(0, wav.sampleCount - 1) / 2);
+    const out = new Uint8Array(outLen);
+    out[0] = 0x57; out[1] = 0x41; out[2] = 0x44; out[3] = 0x50; // WADP
+    writeU32LE(out, 4, wav.sampleRate);
+    writeU32LE(out, 8, wav.sampleCount);
+    if (wav.sampleCount === 0) return out;
+
+    let predictor = readI16LE(wavBytes, wav.pcmOffset);
+    let index = 0;
+    writeI16LE(out, 12, predictor);
+    out[14] = index;
+    out[15] = 0;
+
+    let outPos = 16;
+    let pendingNibble = -1;
+    for (let i = 1; i < wav.sampleCount; i++) {
+        const sample = readI16LE(wavBytes, wav.pcmOffset + i * 2);
+        const step = stepTable[index];
+        let diff = sample - predictor;
+        let code = 0;
+        if (diff < 0) {
+            code = 8;
+            diff = -diff;
+        }
+
+        let delta = step >> 3;
+        if (diff >= step) {
+            code |= 4;
+            diff -= step;
+            delta += step;
+        }
+        if (diff >= (step >> 1)) {
+            code |= 2;
+            diff -= step >> 1;
+            delta += step >> 1;
+        }
+        if (diff >= (step >> 2)) {
+            code |= 1;
+            delta += step >> 2;
+        }
+
+        predictor += (code & 8) ? -delta : delta;
+        if (predictor > 32767) predictor = 32767;
+        if (predictor < -32768) predictor = -32768;
+        index += indexTable[code & 0x0F];
+        if (index < 0) index = 0;
+        if (index > 88) index = 88;
+
+        if (pendingNibble < 0) {
+            pendingNibble = code & 0x0F;
+        } else {
+            out[outPos++] = pendingNibble | ((code & 0x0F) << 4);
+            pendingNibble = -1;
+        }
+    }
+    if (pendingNibble >= 0) out[outPos++] = pendingNibble;
+    return outPos === out.length ? out : out.slice(0, outPos);
 }
 
 async function getVoice(text, voiceName = "zh-CN-XiaoxiaoNeural", rate = '+0%', pitch = '+0Hz', volume = '+0%', style = "general", outputFormat = "audio-24khz-48kbitrate-mono-mp3") {
@@ -2927,4 +3104,3 @@ async function handleAudioTranscription(request) {
         });
     }
 }
-
