@@ -2198,8 +2198,11 @@ async function handleRequest(request, ctx) {
             const cached = await caches.default.match(cacheKey);
             if (cached) {
                 const headers = new Headers(cached.headers);
+                const cachedBytes = await cached.arrayBuffer();
                 headers.set("X-TTS-Cache", "HIT");
-                return new Response(cached.body, {
+                headers.set("Cache-Control", "public, max-age=86400, no-transform");
+                headers.set("Content-Length", String(cachedBytes.byteLength));
+                return new Response(cachedBytes, {
                     status: cached.status,
                     headers
                 });
@@ -2230,34 +2233,39 @@ async function handleRequest(request, ctx) {
 
             if (!response.ok) return response;
 
-            let finalResponse = response;
+            let finalBytes = null;
+            let finalStatus = response.status;
+            const finalHeaders = new Headers(response.headers);
             let adpcmMs = 0;
             if (wantAdpcm) {
                 const adpcmStart = Date.now();
                 const wavBytes = new Uint8Array(await response.arrayBuffer());
                 const adpcmBytes = wavToImaAdpcmWadp(wavBytes);
                 adpcmMs = Date.now() - adpcmStart;
-                finalResponse = new Response(adpcmBytes, {
-                    headers: {
-                        "Content-Type": "application/octet-stream",
-                        "Content-Length": String(adpcmBytes.length),
-                        ...makeCORSHeaders()
-                    }
-                });
+                finalBytes = adpcmBytes;
+                finalHeaders.set("Content-Type", "application/octet-stream");
+                finalHeaders.set("Content-Length", String(adpcmBytes.length));
+            } else {
+                finalBytes = await response.arrayBuffer();
+                finalHeaders.set("Content-Length", String(finalBytes.byteLength));
             }
 
-            const finalHeaders = new Headers(finalResponse.headers);
-            finalHeaders.set("Cache-Control", "public, max-age=86400");
+            for (const [k, v] of Object.entries(makeCORSHeaders())) finalHeaders.set(k, v);
+            finalHeaders.set("Cache-Control", "public, max-age=86400, no-transform");
             finalHeaders.set("X-TTS-Cache", "MISS");
             finalHeaders.set("Server-Timing", `edge;dur=${genMs}, adpcm;dur=${adpcmMs}`);
-            finalResponse = new Response(finalResponse.body, {
-                status: finalResponse.status,
+            const clientResponse = new Response(finalBytes, {
+                status: finalStatus,
                 headers: finalHeaders
             });
-            const putPromise = caches.default.put(cacheKey, finalResponse.clone());
+            const cacheResponse = new Response(finalBytes.slice(0), {
+                status: finalStatus,
+                headers: finalHeaders
+            });
+            const putPromise = caches.default.put(cacheKey, cacheResponse);
             if (ctx && ctx.waitUntil) ctx.waitUntil(putPromise);
             else await putPromise;
-            return finalResponse;
+            return clientResponse;
 
         } catch (error) {
             console.error("Error:", error);
