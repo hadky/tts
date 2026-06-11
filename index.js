@@ -2201,11 +2201,7 @@ async function handleRequest(request, ctx) {
                 const cachedBytes = await cached.arrayBuffer();
                 headers.set("X-TTS-Cache", "HIT");
                 headers.set("Cache-Control", "public, max-age=86400, no-transform");
-                headers.set("Content-Length", String(cachedBytes.byteLength));
-                return new Response(cachedBytes, {
-                    status: cached.status,
-                    headers
-                });
+                return makeBinaryResponse(cachedBytes, cached.status, headers, request);
             }
 
             let outputFormat = "audio-24khz-48kbitrate-mono-mp3";
@@ -2242,7 +2238,7 @@ async function handleRequest(request, ctx) {
                 const wavBytes = new Uint8Array(await response.arrayBuffer());
                 const adpcmBytes = wavToImaAdpcmWadp(wavBytes);
                 adpcmMs = Date.now() - adpcmStart;
-                finalBytes = adpcmBytes;
+                finalBytes = adpcmBytes.buffer.slice(adpcmBytes.byteOffset, adpcmBytes.byteOffset + adpcmBytes.byteLength);
                 finalHeaders.set("Content-Type", "application/octet-stream");
                 finalHeaders.set("Content-Length", String(adpcmBytes.length));
             } else {
@@ -2254,10 +2250,7 @@ async function handleRequest(request, ctx) {
             finalHeaders.set("Cache-Control", "public, max-age=86400, no-transform");
             finalHeaders.set("X-TTS-Cache", "MISS");
             finalHeaders.set("Server-Timing", `edge;dur=${genMs}, adpcm;dur=${adpcmMs}`);
-            const clientResponse = new Response(finalBytes, {
-                status: finalStatus,
-                headers: finalHeaders
-            });
+            const clientResponse = makeBinaryResponse(finalBytes, finalStatus, finalHeaders, request);
             const cacheResponse = new Response(finalBytes.slice(0), {
                 status: finalStatus,
                 headers: finalHeaders
@@ -2296,9 +2289,48 @@ async function handleOptions(request) {
         headers: {
             ...makeCORSHeaders(),
             "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
-            "Access-Control-Allow-Headers": request.headers.get("Access-Control-Request-Headers") || "Authorization"
+            "Access-Control-Allow-Headers": request.headers.get("Access-Control-Request-Headers") || "Authorization, Content-Type, Range"
         }
     });
+}
+
+// 构造完整/Range 二进制响应
+function makeBinaryResponse(bytes, status, headers, request) {
+    const body = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const total = body.byteLength;
+    const outHeaders = new Headers(headers);
+    const range = request.headers.get("Range") || request.headers.get("range") || "";
+
+    outHeaders.set("Accept-Ranges", "bytes");
+    outHeaders.set("Content-Length", String(total));
+    outHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, X-TTS-Cache, Server-Timing");
+
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+    if (!match) {
+        return new Response(body, { status, headers: outHeaders });
+    }
+
+    let start;
+    let end;
+    if (match[1] === "") {
+        const suffixLength = parseInt(match[2], 10);
+        start = Math.max(total - suffixLength, 0);
+        end = total - 1;
+    } else {
+        start = parseInt(match[1], 10);
+        end = match[2] === "" ? total - 1 : parseInt(match[2], 10);
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) {
+        outHeaders.set("Content-Range", `bytes */${total}`);
+        outHeaders.delete("Content-Length");
+        return new Response(null, { status: 416, headers: outHeaders });
+    }
+
+    end = Math.min(end, total - 1);
+    const chunk = body.slice(start, end + 1);
+    outHeaders.set("Content-Length", String(chunk.byteLength));
+    outHeaders.set("Content-Range", `bytes ${start}-${end}/${total}`);
+    return new Response(chunk, { status: 206, headers: outHeaders });
 }
 
 // 添加延迟函数
